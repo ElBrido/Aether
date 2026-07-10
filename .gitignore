@@ -1,0 +1,4 @@
+# Build artifacts
+obj/
+*.o
+aether_engine
