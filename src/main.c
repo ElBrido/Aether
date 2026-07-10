@@ -118,7 +118,11 @@ int main() {
         }
     }
 
-    printf("\n[Sistema] Prueba de Deducción (Inferencia):\n");
+    printf("\n[Sistema] Entrando en reposo...\n");
+    // Seccion V: Rutina de Optimizacion en Segundo Plano
+    aether_background_optimization(net);
+
+    printf("\n[Sistema] Prueba de Deducción (Inferencia tras optimización):\n");
     printf("Input: 'h' -> Output esperado: 'o' -> 'l' -> 'a' -> ' ' -> 'm' -> 'u' -> 'n' -> 'd' -> 'o'\n");
 
     // Clean state

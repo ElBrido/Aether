@@ -210,3 +210,44 @@ int aether_neurogenesis_check(Network* net, double error_signal) {
     }
     return -1;
 }
+
+// Background Optimization (Desfragmentación y Ensoñación Estructurada)
+// Runs when the system is idle to optimize memory, prune weak connections,
+// and structure knowledge for faster inference.
+void aether_background_optimization(Network* net) {
+    printf("[A.E.T.H.E.R] Iniciando Rutina de Optimización en Segundo Plano (Ensoñación Estructurada)...\n");
+    int pruned_connections = 0;
+
+    for (int i = 0; i < net->num_nodes; ++i) {
+        Connection* curr = net->nodes[i].connections;
+        Connection* prev = NULL;
+
+        while (curr) {
+            // 1. Desfragmentación: Prune extremely weak connections (close to 0 weight)
+            if (fabs(curr->weight) < 0.005) {
+                Connection* to_delete = curr;
+                if (prev) {
+                    prev->next = curr->next;
+                } else {
+                    net->nodes[i].connections = curr->next;
+                }
+                curr = curr->next;
+                free(to_delete);
+                pruned_connections++;
+                continue;
+            }
+
+            // 2. Ensoñación Estructurada: Normalize and consolidate weights
+            // Slightly decay all weights to prevent saturation and maintain plasticity
+            curr->weight *= 0.99;
+
+            prev = curr;
+            curr = curr->next;
+        }
+
+        // 3. Normalize node frequencies slightly towards harmonics to stabilize the engine
+        net->nodes[i].frequency = fmod(net->nodes[i].frequency, 2.0 * M_PI);
+    }
+
+    printf("[A.E.T.H.E.R] Optimización completada. %d conexiones débiles eliminadas. Red consolidada y lista.\n", pruned_connections);
+}

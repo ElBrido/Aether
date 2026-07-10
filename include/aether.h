@@ -52,4 +52,7 @@ void aether_step(Network* net);
 void aether_apply_hebbian_learning(Network* net);
 int aether_neurogenesis_check(Network* net, double error_signal);
 
+// Background Optimization (Desfragmentación y Ensoñación Estructurada)
+void aether_background_optimization(Network* net);
+
 #endif // AETHER_H
