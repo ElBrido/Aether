@@ -10,55 +10,107 @@
 typedef struct Tensor {
     int rows;
     int cols;
-    double* data; // Contiguous 1D array for 2D data
+    float* data; // Contiguous 1D array for 2D data (using float for performance)
 } Tensor;
 
-// Memory Management
 Tensor* tensor_create(int rows, int cols);
 void tensor_free(Tensor* t);
-void tensor_randomize(Tensor* t, double min_val, double max_val);
+void tensor_randomize(Tensor* t, float min_val, float max_val);
 void tensor_zero(Tensor* t);
-
-// Math Operations
 void tensor_add(Tensor* out, Tensor* a, Tensor* b);
-void tensor_matmul(Tensor* out, Tensor* a, Tensor* b); // out = A * B
-void tensor_scale(Tensor* t, double scalar);
+void tensor_matmul(Tensor* out, Tensor* a, Tensor* b);
+void tensor_scale(Tensor* t, float scalar);
 void tensor_copy(Tensor* dst, Tensor* src);
 
 // ---------------------------------------------------------
-// STATE SPACE MODEL (SSM) & NEURAL ODE CORE
+// NEURAL ODE (dh/dt = tanh(W_hh·h + W_xh·x + bias))
 // ---------------------------------------------------------
-// Represents a single continuous-time layer h_t = A * h_{t-1} + B * x_t
-typedef struct SSM_Layer {
+typedef struct ODEFunc {
+    int hidden_dim;
+    int input_dim;
+    Tensor* W_hh;
+    Tensor* W_xh;
+    Tensor* bias;
+
+    // Buffers for RK4 to avoid mallocs
+    Tensor* buf_Whh_h;
+    Tensor* buf_Wxh_x;
+    Tensor* buf_dhdt;
+} ODEFunc;
+
+ODEFunc* ode_func_create(int hidden_dim, int input_dim);
+void ode_func_free(ODEFunc* f);
+void ode_func_forward(const ODEFunc *f, const Tensor *h, float t, const Tensor *x, Tensor *dhdt);
+
+// Integrator RK4
+void rk4_step(const ODEFunc *f, Tensor *h, const Tensor *x, float dt);
+
+// ---------------------------------------------------------
+// SSM LAYER (Mamba-style Zero-Order Hold)
+// ---------------------------------------------------------
+typedef struct SSMLayer {
     int state_dim;
     int input_dim;
 
-    // Core Matrices
-    Tensor* A; // Transition matrix (state_dim x state_dim)
-    Tensor* B; // Input matrix (state_dim x input_dim)
-    Tensor* C; // Output projection (input_dim x state_dim)
+    Tensor* A; // Transition matrix
+    Tensor* B; // Input projection
+    Tensor* C; // Output projection
+    Tensor* D; // Skip connection
 
-    // Continuous State (O(1) memory during inference)
-    Tensor* h; // Hidden state (state_dim x 1)
+    // Learnable Delta for discretization
+    Tensor* delta;
 
-    // Efficient inference buffers (allocated once to avoid malloc in hot loop)
+    // Discretized parameters (ā = exp(ΔA), b̄ = (ā-1)/A * B)
+    Tensor* A_bar;
+    Tensor* B_bar;
+
+    // Hidden continuous state O(1)
+    Tensor* h;
+
+    // Buffers
     Tensor* buf_Ah;
     Tensor* buf_Bx;
-    Tensor* buf_dh;
+} SSMLayer;
 
-    // Neuroplasticity Hooks (EWC / Hebbian)
-    Tensor* A_fisher; // Fisher information for A to prevent catastrophic forgetting
-    Tensor* A_anchor; // Base weights of A for EWC penalty
-} SSM_Layer;
+SSMLayer* ssm_create(int state_dim, int input_dim);
+void ssm_free(SSMLayer* layer);
+void ssm_discretize(SSMLayer* layer);
+void ssm_forward_step(SSMLayer* layer, const Tensor* x_t, Tensor* out_t);
 
-SSM_Layer* ssm_create(int state_dim, int input_dim);
-void ssm_free(SSM_Layer* layer);
+// ---------------------------------------------------------
+// ELASTIC WEIGHT CONSOLIDATION (EWC)
+// ---------------------------------------------------------
+typedef struct EWC_Params {
+    Tensor* params;
+    Tensor* fisher;
+    Tensor* anchor;
+} EWC_Params;
 
-// Forward propagation in continuous time (ODE Step)
-// dt: time step for Euler integration
-void ssm_forward_step(SSM_Layer* layer, Tensor* x_t, Tensor* out_t, double dt);
+EWC_Params* ewc_create(Tensor* target_params);
+void ewc_free(EWC_Params* ewc);
+void ewc_snapshot(EWC_Params* ewc);
+float ewc_penalty(EWC_Params* ewc, float lambda);
 
-// Initializes EWC anchors to current weights
-void ssm_prepare_ewc_hooks(SSM_Layer* layer);
+// ---------------------------------------------------------
+// A.E.T.H.E.R. ENGINE (Composition)
+// ---------------------------------------------------------
+typedef struct AetherEngine {
+    int vocab_size;
+    int hidden_dim;
+
+    ODEFunc* ode;
+    SSMLayer* ssm;
+
+    // Final linear projection to logits
+    Tensor* W_out;
+    Tensor* b_out;
+
+    // Memory
+    Tensor* logits;
+} AetherEngine;
+
+AetherEngine* aether_create(int vocab_size, int hidden_dim);
+void aether_free(AetherEngine* engine);
+void aether_forward(AetherEngine* engine, const Tensor* x_t);
 
 #endif // AETHER_CORE_H

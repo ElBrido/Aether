@@ -1,5 +1,5 @@
 # Build artifacts
-obj/
+build/
 *.o
 aether_engine
 aether_engine_v2
