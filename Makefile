@@ -9,7 +9,7 @@ INC_DIR = include
 SRCS = $(wildcard $(SRC_DIR)/*.c)
 OBJS = $(SRCS:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
 
-TARGET = aether_engine
+TARGET = aether_engine_v2
 
 .PHONY: all clean
 

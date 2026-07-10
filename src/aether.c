@@ -189,21 +189,23 @@ int aether_neurogenesis_check(Network* net, double error_signal) {
                     new_node_id, error_signal, net->neurogenesis_threshold);
 
             // Connect the new node sparsely to the network
-            int num_connections = (net->num_nodes - 1) * 0.1; // Connect to 10% of existing nodes
-            if (num_connections < 1) num_connections = 1;
-            if (num_connections > 5) num_connections = 5; // Cap initial connections
+            if (net->num_nodes > 1) { // Prevents modulo by zero when only 1 node exists
+                int num_connections = (net->num_nodes - 1) * 0.1; // Connect to 10% of existing nodes
+                if (num_connections < 1) num_connections = 1;
+                if (num_connections > 5) num_connections = 5; // Cap initial connections
 
-            for(int i = 0; i < num_connections; i++) {
-                int target = rand() % (net->num_nodes - 1);
-                double init_weight = ((double)rand() / RAND_MAX) * 0.2 - 0.1; // [-0.1, 0.1]
-                double init_phase = ((double)rand() / RAND_MAX) * 2.0 * M_PI - M_PI; // [-PI, PI]
+                for(int i = 0; i < num_connections; i++) {
+                    int target = rand() % (net->num_nodes - 1);
+                    double init_weight = ((double)rand() / RAND_MAX) * 0.2 - 0.1; // [-0.1, 0.1]
+                    double init_phase = ((double)rand() / RAND_MAX) * 2.0 * M_PI - M_PI; // [-PI, PI]
 
-                aether_add_connection(net, new_node_id, target, init_weight, init_phase);
+                    aether_add_connection(net, new_node_id, target, init_weight, init_phase);
 
-                // Reciprocal connection
-                double init_weight_recip = ((double)rand() / RAND_MAX) * 0.2 - 0.1;
-                double init_phase_recip = ((double)rand() / RAND_MAX) * 2.0 * M_PI - M_PI;
-                aether_add_connection(net, target, new_node_id, init_weight_recip, init_phase_recip);
+                    // Reciprocal connection
+                    double init_weight_recip = ((double)rand() / RAND_MAX) * 0.2 - 0.1;
+                    double init_phase_recip = ((double)rand() / RAND_MAX) * 2.0 * M_PI - M_PI;
+                    aether_add_connection(net, target, new_node_id, init_weight_recip, init_phase_recip);
+                }
             }
         }
         return new_node_id;
