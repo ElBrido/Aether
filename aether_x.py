@@ -1,26 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""AETHER-X X0: celda recurrente compartida para modelos pequenos.
-
-X0 aisla la arquitectura antes de mezclar bytes, memoria externa, MoE o MTP.
-Usa el tokenizer BPE actual a proposito: si algo falla aqui, es la celda.
-"""
+"""AETHER-X X0: celda recurrente compartida para modelos pequenos."""
 from __future__ import annotations
-
 import argparse
 from dataclasses import dataclass
 from typing import Optional, Tuple
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
 from aether_v4 import KairosTokenizer, RMSNorm, lm_loss
 
 X0_CFG = dict(vocab_size=16_000, hidden_dim=512, ffn_dim=2048,
               memory_slots=8, scratch_size=32, deep_threshold=0.50,
               tie_embeddings=True)
-
 
 @dataclass
 class XState:
@@ -29,10 +21,8 @@ class XState:
     scratch: torch.Tensor
     pos: torch.Tensor
 
-
 def _select(st: XState, idx):
     return XState(st.fast[idx], st.slots[idx], st.scratch[idx], st.pos[idx])
-
 
 def _merge(base: XState, sub: XState, idx):
     def put(a, b):
@@ -40,10 +30,8 @@ def _merge(base: XState, sub: XState, idx):
     return XState(put(base.fast, sub.fast), put(base.slots, sub.slots),
                   put(base.scratch, sub.scratch), put(base.pos, sub.pos))
 
-
 class SharedAetherCell(nn.Module):
     """Celda compartida con memoria fast, asociativa y scratchpad literal."""
-
     def __init__(self, d, ffn_dim, slots, scratch, deep_threshold=0.5):
         super().__init__()
         self.d, self.n_slots, self.scratch_size = d, slots, scratch
@@ -109,16 +97,18 @@ class SharedAetherCell(nn.Module):
         if not deep.any(): return h1, s1
         idx = deep.nonzero(as_tuple=False).squeeze(-1)
         h2, s2 = self._core(h1[idx], _select(s1, idx))
-        # Soft interpolation only on selected rows: the route is efficient,
-        # but the halt head still receives gradient from the chosen depth.
         p = p_fast[idx].unsqueeze(-1)
         h = h1.clone(); h[idx] = p * h1[idx] + (1.0 - p) * h2
         return h, _merge(s1, s2, idx)
 
-    def route_penalty(self):
-        if self._halt_sum is None: return torch.zeros((), device=self.halt.weight.device)
-        # Penaliza pensar de mas; el modelo solo usa deep si compra loss.
-        return self._halt_sum / max(1, self._halt_count)
+    def route_penalty(self, clear=True):
+        if self._halt_sum is None:
+            return torch.zeros((), device=self.halt.weight.device)
+        out = self._halt_sum / max(1, self._halt_count)
+        # El grafo pertenece a este batch; no lo arrastramos al siguiente.
+        if clear:
+            self._halt_sum = None; self._halt_count = 0
+        return out
 
     def reset_stats(self):
         self._deep_tokens = self._total_tokens = self._halt_count = 0
@@ -128,10 +118,8 @@ class SharedAetherCell(nn.Module):
         return dict(deep_tokens=self._deep_tokens, total_tokens=self._total_tokens,
                     deep_ratio=self._deep_tokens / max(1, self._total_tokens))
 
-
 class AetherX(nn.Module):
     """Backbone X0: comparte la celda, no duplica un stack Transformer."""
-
     def __init__(self, vocab_size, cfg: Optional[dict] = None):
         super().__init__()
         c = dict(X0_CFG); c.update(cfg or {})
@@ -139,8 +127,7 @@ class AetherX(nn.Module):
         d = c["hidden_dim"]; self.d_model = d
         self.embedding = nn.Embedding(vocab_size, d)
         self.emb_norm = RMSNorm(d)
-        self.cell = SharedAetherCell(d, c["ffn_dim"], c["memory_slots"],
-                                     c["scratch_size"], c["deep_threshold"])
+        self.cell = SharedAetherCell(d, c["ffn_dim"], c["memory_slots"], c["scratch_size"], c["deep_threshold"])
         self.final_norm = RMSNorm(d)
         self.fc_out = nn.Linear(d, vocab_size, bias=False)
         if c.get("tie_embeddings", True): self.fc_out.weight = self.embedding.weight
@@ -156,19 +143,16 @@ class AetherX(nn.Module):
 
     def forward(self, idx, state: Optional[XState] = None, return_state=False, adaptive=True):
         b, t = idx.shape
-        x = self.emb_norm(self.embedding(idx))
-        st = state or self.init_state(b, x.device, x.dtype)
+        x = self.emb_norm(self.embedding(idx)); st = state or self.init_state(b, x.device, x.dtype)
         out = []
         for j in range(t):
-            h, st = self.cell.step(x[:, j], st, adaptive)
-            out.append(h)
+            h, st = self.cell.step(x[:, j], st, adaptive); out.append(h)
         logits = self.fc_out(self.final_norm(torch.stack(out, 1)))
         return (logits, st) if return_state else logits
 
     @torch.no_grad()
     def step(self, idx_t, state):
-        x = self.emb_norm(self.embedding(idx_t))
-        h, state = self.cell.step(x, state, True)
+        x = self.emb_norm(self.embedding(idx_t)); h, state = self.cell.step(x, state, True)
         return self.fc_out(self.final_norm(h)), state
 
     @torch.no_grad()
@@ -184,8 +168,7 @@ class AetherX(nn.Module):
                 p = (z / temperature).softmax(-1)
                 if 0 < top_p < 1:
                     sp, si = p.sort(descending=True); keep = (sp.cumsum(-1) - sp) <= top_p
-                    sp = sp * keep; sp = sp / sp.sum().clamp_min(1e-9)
-                    nxt = int(si[torch.multinomial(sp, 1)].item())
+                    sp = sp * keep; sp = sp / sp.sum().clamp_min(1e-9); nxt = int(si[torch.multinomial(sp, 1)].item())
                 else: nxt = int(torch.multinomial(p, 1).item())
             if nxt == 3: break
             out.append(nxt); last, state = self.step(torch.tensor([[nxt]], device=dev), state)
@@ -196,25 +179,20 @@ class AetherX(nn.Module):
 
 
 def smoke(device="cpu"):
-    torch.manual_seed(7)
-    c = dict(X0_CFG, hidden_dim=96, ffn_dim=256, memory_slots=4, scratch_size=8)
+    torch.manual_seed(7); c = dict(X0_CFG, hidden_dim=96, ffn_dim=256, memory_slots=4, scratch_size=8)
     m = AetherX(128, c).to(device).train(); ids = torch.randint(0, 128, (2, 19), device=device)
     logits, st = m(ids, return_state=True); loss = lm_loss(logits[:, :-1], ids[:, 1:]) + 1e-3 * m.cell.route_penalty(); loss.backward()
     with torch.no_grad():
-        m.eval(); a = m(ids, m.init_state(2, device), adaptive=False)
-        ss = m.init_state(2, device); ys = []
-        for j in range(ids.shape[1]):
-            y, ss = m.step(ids[:, j:j + 1], ss); ys.append(y)
+        m.eval(); a = m(ids, m.init_state(2, device), adaptive=False); ss = m.init_state(2, device); ys = []
+        for j in range(ids.shape[1]): y, ss = m.step(ids[:, j:j + 1], ss); ys.append(y)
         err = (a - torch.cat(ys, 1)).abs().max().item()
     ok = torch.isfinite(loss).item() and err < 1e-4 and st.fast.shape == (2, 96)
-    print(f"X0 smoke | params={m.count_parameters():,} | loss={loss.item():.4f} | step_err={err:.2e} | {'OK' if ok else 'FALLA'}")
+    print(f"X0 smoke | params={m.count_parameters()} | loss={loss.item():.4f} | step_err={err:.2e} | {'OK' if ok else 'FALLA'}")
     return 0 if ok else 1
-
 
 def main():
     ap = argparse.ArgumentParser("AETHER-X X0"); ap.add_argument("--smoke", action="store_true")
     if ap.parse_args().smoke: raise SystemExit(smoke("cuda" if torch.cuda.is_available() else "cpu"))
     print("Corre: python aether_x.py --smoke")
-
 
 if __name__ == "__main__": main()
