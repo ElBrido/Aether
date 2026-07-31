@@ -105,7 +105,6 @@ class SharedAetherCell(nn.Module):
         if self._halt_sum is None:
             return torch.zeros((), device=self.halt.weight.device)
         out = self._halt_sum / max(1, self._halt_count)
-        # El grafo pertenece a este batch; no lo arrastramos al siguiente.
         if clear:
             self._halt_sum = None; self._halt_count = 0
         return out
@@ -151,8 +150,16 @@ class AetherX(nn.Module):
         return (logits, st) if return_state else logits
 
     @torch.no_grad()
-    def step(self, idx_t, state):
-        x = self.emb_norm(self.embedding(idx_t)); h, state = self.cell.step(x, state, True)
+    def step(self, idx_t, state, adaptive=True):
+        """Procesa [B] o [B,1]; normaliza la dimension singleton antes de la celda."""
+        if idx_t.ndim == 2:
+            if idx_t.shape[1] != 1:
+                raise ValueError(f"step espera [B] o [B,1], recibio {tuple(idx_t.shape)}")
+            idx_t = idx_t[:, 0]
+        if idx_t.ndim != 1:
+            raise ValueError(f"step espera [B] o [B,1], recibio {tuple(idx_t.shape)}")
+        x = self.emb_norm(self.embedding(idx_t))
+        h, state = self.cell.step(x, state, adaptive)
         return self.fc_out(self.final_norm(h)), state
 
     @torch.no_grad()
@@ -171,7 +178,7 @@ class AetherX(nn.Module):
                     sp = sp * keep; sp = sp / sp.sum().clamp_min(1e-9); nxt = int(si[torch.multinomial(sp, 1)].item())
                 else: nxt = int(torch.multinomial(p, 1).item())
             if nxt == 3: break
-            out.append(nxt); last, state = self.step(torch.tensor([[nxt]], device=dev), state)
+            out.append(nxt); last, state = self.step(torch.tensor([[nxt]], device=dev), state, adaptive=True)
         return tok.decode(out), state
 
     def count_parameters(self):
@@ -184,7 +191,7 @@ def smoke(device="cpu"):
     logits, st = m(ids, return_state=True); loss = lm_loss(logits[:, :-1], ids[:, 1:]) + 1e-3 * m.cell.route_penalty(); loss.backward()
     with torch.no_grad():
         m.eval(); a = m(ids, m.init_state(2, device), adaptive=False); ss = m.init_state(2, device); ys = []
-        for j in range(ids.shape[1]): y, ss = m.step(ids[:, j:j + 1], ss); ys.append(y)
+        for j in range(ids.shape[1]): y, ss = m.step(ids[:, j:j + 1], ss, adaptive=False); ys.append(y)
         err = (a - torch.cat(ys, 1)).abs().max().item()
     ok = torch.isfinite(loss).item() and err < 1e-4 and st.fast.shape == (2, 96)
     print(f"X0 smoke | params={m.count_parameters()} | loss={loss.item():.4f} | step_err={err:.2e} | {'OK' if ok else 'FALLA'}")
