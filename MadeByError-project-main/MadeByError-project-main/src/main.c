@@ -1,7 +1,3 @@
-#ifdef _WIN32
-#include <windows.h>
-#endif
-
 #include "aether_core.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -9,14 +5,14 @@
 #include <time.h>
 
 static const char* SYSTEM_TEXT =
-    "Eres Kairos, una Inteligencia Artificial hiper-logica y servicial creada por brido.";
+    "Eres Kairos, una Inteligencia Artificial hiper-logica creada por brido.";
 
 #define MAX_PROMPT_IDS 4096
 
 static void print_banner(void) {
     printf("\n");
     printf("  ==========================================================\n");
-    printf("   A.E.T.H.E.R. - Motor de Inferencia v3.1 (CROF, C11)\n");
+    printf("   A.E.T.H.E.R. - Motor de Inferencia v3.0 (CROF, C11)\n");
     printf("   Memoria Rotacional Compleja O(1) - Latencia Fija\n");
     printf("   BPE Espanol 16k - CPU Ultra-Bajo Costo - by brido\n");
     printf("  ==========================================================\n\n");
@@ -41,12 +37,11 @@ static void parity_test(AetherEngine* engine) {
 }
 
 static void generate_interactive(AetherEngine* engine, BPETokenizer* tok) {
-    printf("=== MODO GENERACION INTERACTIVA (CROF v3.1 + BPE) ===\n");
+    printf("=== MODO GENERACION INTERACTIVA (CROF v3.0 + BPE) ===\n");
     printf("Escribe tu prompt (o 'salir' para terminar).\n");
-    printf("Modo: Deterministico Greedy (Temperatura: 0.00 | Repetition Penalty: 1.20) | Max tokens: 150\n\n");
+    printf("Temperatura: 0.8 | Top-P: 0.95 | Max tokens: 200\n\n");
 
-    Sampler* sampler = sampler_create(engine->vocab_size, 0.00f, 1.00f);
-
+    Sampler* sampler = sampler_create(engine->vocab_size, 0.8f, 0.95f);
     srand((unsigned int)time(NULL));
 
     char input_buf[1024];
@@ -65,14 +60,14 @@ static void generate_interactive(AetherEngine* engine, BPETokenizer* tok) {
         if (len == 0) continue;
         if (strcmp(input_buf, "salir") == 0) break;
 
+        // Prompt identico al formato de entrenamiento:
+        // <SYS> system_text <USR> user_text <AST>
         int n = 0;
-        prompt_ids[n++] = tok->bos_id;   /* BOS — igual que en finetune_chat.py */
         prompt_ids[n++] = tok->sys_id;
         n += bpe_encode(tok, SYSTEM_TEXT, prompt_ids + n, MAX_PROMPT_IDS - n - 2);
         prompt_ids[n++] = tok->usr_id;
         n += bpe_encode(tok, input_buf, prompt_ids + n, MAX_PROMPT_IDS - n - 1);
         prompt_ids[n++] = tok->ast_id;
-
 
         aether_reset(engine);
         for (int i = 0; i < n; i++) {
@@ -80,28 +75,12 @@ static void generate_interactive(AetherEngine* engine, BPETokenizer* tok) {
         }
 
         printf("\nKairos: ");
-        int max_tokens = 150;
-        int recent_tokens[128];
-        int num_recent = 0;
+        int max_tokens = 200;
 
         for (int t = 0; t < max_tokens; t++) {
-            // Repetition Penalty (1.20x)
-            for (int r = 0; r < num_recent; r++) {
-                int tok_id = recent_tokens[r];
-                if (engine->logits->data[tok_id] > 0) {
-                    engine->logits->data[tok_id] /= 1.20f;
-                } else {
-                    engine->logits->data[tok_id] *= 1.20f;
-                }
-            }
-
             int next_tok = sampler_sample(sampler, engine->logits);
 
             if (next_tok == tok->eos_id) break;
-
-            if (num_recent < 128) {
-                recent_tokens[num_recent++] = next_tok;
-            }
 
             bpe_print_token(tok, next_tok);
             fflush(stdout);
@@ -115,11 +94,7 @@ static void generate_interactive(AetherEngine* engine, BPETokenizer* tok) {
 }
 
 int main(int argc, char* argv[]) {
-#ifdef _WIN32
-    SetConsoleOutputCP(65001); // Activar codificacion UTF-8 en PowerShell / CMD
-#endif
     print_banner();
-
 
     const char* weights_path = "kairos_weights.bin";
     const char* tokenizer_path = "kairos_tokenizer.bin";
@@ -140,10 +115,7 @@ int main(int argc, char* argv[]) {
     BPETokenizer* tok = bpe_load(tokenizer_path);
     if (!tok) {
         printf("[Sistema] No se encontro el tokenizador '%s'.\n", tokenizer_path);
-        printf("[Sistema] Coloca 'kairos_tokenizer.bin' y 'kairos_weights.bin' en esta carpeta.\n");
-        printf("[Sistema] Presiona Enter para salir...");
-        fflush(stdout);
-        getchar();
+        printf("[Sistema] Exportalo desde PyTorch con export_tokenizer_bin() y vuelve a ejecutar.\n");
         aether_free(engine);
         return 1;
     }
@@ -158,9 +130,5 @@ int main(int argc, char* argv[]) {
     bpe_free(tok);
     aether_free(engine);
     printf("[Sistema] Motor apagado. Memoria liberada.\n");
-    printf("\nPresiona Enter para cerrar...");
-    fflush(stdout);
-    getchar();
     return 0;
 }
-

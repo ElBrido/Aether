@@ -139,9 +139,7 @@ typedef struct BPETokenizer {
     int* merge_right;   // [num_merges]
     int* merge_new;     // [num_merges]
     int pad_id, unk_id, bos_id, eos_id, sys_id, usr_id, ast_id;
-    int byte_to_id[256]; // Mapa exacto byte->token_id (byte-level BPE)
 } BPETokenizer;
-
 
 BPETokenizer* bpe_load(const char* filepath);
 void bpe_free(BPETokenizer* t);

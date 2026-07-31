@@ -2,5 +2,16 @@
 build/
 *.o
 aether_engine
-aether_engine_v2
+aether_engine.exe
+
+# Model weights
 *.pt
+*.bin
+
+# Python cache
+__pycache__/
+*.pyc
+
+# IDE
+.vscode/
+.idea/

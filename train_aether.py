@@ -2,7 +2,9 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torchdiffeq import odeint
+import struct
 import math
+import numpy as np
 
 # ==========================================
 # I. IDENTIDAD Y TOKENIZADOR
@@ -82,17 +84,18 @@ class SSMLayer(nn.Module):
         # x: [batch, input_dim]
         # h_prev: [batch, state_dim]
 
-        # ZOH Discretization
-        # ā = exp(Δ * A)
-        delta_A = self.delta * self.A
-        A_bar = torch.matrix_exp(delta_A)
+        # ZOH Discretization using diagonal shortcut
+        # Since A is diagonal (HiPPO init), we use element-wise ops
+        A_diag = torch.diag(self.A)  # [state_dim]
+        delta_A_diag = self.delta * A_diag
+        A_bar_diag = torch.exp(delta_A_diag)  # exp(Δ * a_i)
 
-        # b̄ = (ā - 1) / A * B
-        # For a diagonal matrix A, this is simple. For a general matrix, it's an inverse matrix.
-        # Approximation or exact computation for diagonal A:
-        A_inv = torch.inverse(self.A)
-        A_bar_minus_I = A_bar - torch.eye(self.state_dim, device=x.device)
-        B_bar = A_bar_minus_I @ A_inv @ self.B
+        # b̄_i = (exp(Δ * a_i) - 1) / a_i  (stable for diagonal A)
+        scalar = (A_bar_diag - 1.0) / A_diag  # [state_dim]
+        B_bar = scalar.unsqueeze(1) * self.B   # [state_dim, input_dim]
+
+        # Full A_bar as diagonal matrix for matmul
+        A_bar = torch.diag(A_bar_diag)  # [state_dim, state_dim]
 
         # h_t = ā * h_{t-1} + b̄ * x_t
         h_t = (A_bar @ h_prev.unsqueeze(-1)).squeeze(-1) + (B_bar @ x.unsqueeze(-1)).squeeze(-1)
@@ -103,14 +106,18 @@ class SSMLayer(nn.Module):
         return y_t, h_t
 
 
-# 3. Aether Engine Completado
+# 3. Aether Engine Completado (con Inyección de Caos)
 class AetherEngine(nn.Module):
-    def __init__(self, vocab_size, hidden_dim, ssm_state_dim):
+    def __init__(self, vocab_size, hidden_dim, ssm_state_dim, chaos_sigma=0.02):
         super(AetherEngine, self).__init__()
         self.hidden_dim = hidden_dim
         self.ssm_state_dim = ssm_state_dim
+        self.vocab_size = vocab_size
 
         self.embedding = nn.Embedding(vocab_size, hidden_dim)
+
+        # Inyección de Caos: parámetro sigma aprendible para ruido gaussiano
+        self.chaos_sigma = nn.Parameter(torch.tensor([chaos_sigma]))
 
         self.ode_func = ODEFunc(hidden_dim, hidden_dim)
 
@@ -119,14 +126,21 @@ class AetherEngine(nn.Module):
 
         self.fc_out = nn.Linear(hidden_dim, vocab_size)
 
-    def forward(self, x_seq):
+    def forward(self, x_seq, temperature=1.0):
         # x_seq: [batch, seq_len]
         batch_size, seq_len = x_seq.shape
 
         # 1. Embeddings
         x_emb = self.embedding(x_seq) # [batch, seq_len, hidden_dim]
 
-        # 2. Iterate through sequence
+        # 2. Inyección de Caos: Perturbación Latente gaussiana
+        # x_emb += N(0, sigma² * temperature)
+        # Deshabilitado en eval (torch.no_grad) o cuando temperature=0
+        if self.training and temperature > 0:
+            noise = torch.randn_like(x_emb) * self.chaos_sigma * temperature
+            x_emb = x_emb + noise
+
+        # 3. Iterate through sequence
         logits_seq = []
 
         # Initial states
@@ -155,6 +169,55 @@ class AetherEngine(nn.Module):
             logits_seq.append(logits.unsqueeze(1))
 
         return torch.cat(logits_seq, dim=1)
+
+    def generate(self, tokenizer, prompt, max_tokens=100, temperature=0.8):
+        """Generación autogresiva con muestreo multinomial."""
+        self.eval()
+        input_ids = tokenizer.encode(prompt, prepend_identity=True)
+        generated = input_ids.tolist()
+
+        # Estado SSM persistente para generación
+        h_ssm = torch.zeros(1, self.ssm_state_dim)
+        t_span = torch.linspace(0.0, 1.0, 11)
+
+        with torch.no_grad():
+            # Procesar contexto previo para construir estado SSM
+            for tok in generated[:-1]:
+                tok_tensor = torch.tensor([[tok]], dtype=torch.long)
+                x_emb = self.embedding(tok_tensor).squeeze(0).squeeze(0)  # [hidden_dim]
+
+                self.ode_func.current_x = x_emb.unsqueeze(0)
+                h_ode_init = torch.zeros(1, self.hidden_dim)
+                h_ode_traj = odeint(self.ode_func, h_ode_init, t_span, method='rk4')
+                h_ode_final = h_ode_traj[-1]
+
+                _, h_ssm = self.ssm(h_ode_final, h_ssm)
+
+            # Generar token a token
+            current_tok = generated[-1]
+            for _ in range(max_tokens):
+                tok_tensor = torch.tensor([[current_tok]], dtype=torch.long)
+                x_emb = self.embedding(tok_tensor).squeeze(0).squeeze(0)
+
+                self.ode_func.current_x = x_emb.unsqueeze(0)
+                h_ode_init = torch.zeros(1, self.hidden_dim)
+                h_ode_traj = odeint(self.ode_func, h_ode_init, t_span, method='rk4')
+                h_ode_final = h_ode_traj[-1]
+
+                y_ssm, h_ssm = self.ssm(h_ode_final, h_ssm)
+                logits = self.fc_out(y_ssm)  # [1, vocab_size]
+
+                # Muestreo Multinomial con Temperatura
+                if temperature > 0:
+                    probs = torch.softmax(logits / temperature, dim=-1)
+                    next_token = torch.multinomial(probs, num_samples=1).item()
+                else:
+                    next_token = logits.argmax(dim=-1).item()
+
+                generated.append(next_token)
+                current_tok = next_token
+
+        return tokenizer.decode(torch.tensor(generated))
 
 
 # ==========================================
@@ -226,7 +289,7 @@ def parity_test(engine):
     dummy_input = torch.tensor([[1, 1, 1]], dtype=torch.long)
 
     with torch.no_grad():
-        logits = engine(dummy_input)
+        logits = engine(dummy_input, temperature=0.0)
 
     # Extraemos los primeros 20 valores flotantes del output (logits) del último token
     final_logits = logits[0, -1, :20].cpu().numpy()
@@ -235,6 +298,93 @@ def parity_test(engine):
     for i, val in enumerate(final_logits):
         print(f"[{i:02d}]: {val:.6f}")
 
+    return final_logits
+
+
+def export_to_bin(engine, filepath="aether_weights.bin"):
+    """
+    Exporta todos los pesos del modelo a un archivo binario plano (.bin)
+    para ser leído por el cargador en C.
+
+    Layout del binario (todo float32, little-endian):
+    ┌─────────────────────────────────────────────────────────┐
+    │ HEADER (6 x int32)                                     │
+    │   magic: 0x41455448 ('AETH')                           │
+    │   version: 1                                           │
+    │   vocab_size                                           │
+    │   hidden_dim                                           │
+    │   ssm_state_dim                                        │
+    │   chaos_sigma (as float32)                             │
+    ├─────────────────────────────────────────────────────────┤
+    │ EMBEDDING: vocab_size × hidden_dim                     │
+    ├─────────────────────────────────────────────────────────┤
+    │ ODE W_hh.weight: hidden_dim × hidden_dim               │
+    │ ODE W_hh.bias: hidden_dim                              │
+    │ ODE W_xh.weight: hidden_dim × hidden_dim               │
+    ├─────────────────────────────────────────────────────────┤
+    │ SSM A: ssm_state_dim × ssm_state_dim                   │
+    │ SSM B: ssm_state_dim × hidden_dim                      │
+    │ SSM C: hidden_dim × ssm_state_dim                      │
+    │ SSM D: hidden_dim × hidden_dim                          │
+    │ SSM delta: 1                                           │
+    ├─────────────────────────────────────────────────────────┤
+    │ FC_OUT.weight: vocab_size × hidden_dim                  │
+    │ FC_OUT.bias: vocab_size                                │
+    └─────────────────────────────────────────────────────────┘
+    """
+    print(f"\n--- EXPORTANDO PESOS A {filepath} ---")
+    sd = engine.state_dict()
+
+    with open(filepath, 'wb') as f:
+        # Header
+        f.write(struct.pack('<I', 0x41455448))  # Magic 'AETH'
+        f.write(struct.pack('<I', 1))            # Version
+        f.write(struct.pack('<I', engine.vocab_size))
+        f.write(struct.pack('<I', engine.hidden_dim))
+        f.write(struct.pack('<I', engine.ssm_state_dim))
+        f.write(struct.pack('<f', sd['chaos_sigma'].item()))
+
+        total_params = 0
+
+        # Escribir tensores en orden determinístico
+        param_order = [
+            'embedding.weight',
+            'ode_func.W_hh.weight',
+            'ode_func.W_hh.bias',
+            'ode_func.W_xh.weight',
+            'ssm.A',
+            'ssm.B',
+            'ssm.C',
+            'ssm.D',
+            'ssm.delta',
+            'fc_out.weight',
+            'fc_out.bias',
+        ]
+
+        for name in param_order:
+            tensor = sd[name].cpu().contiguous().float()
+            data = tensor.numpy().flatten()
+            f.write(data.tobytes())
+            total_params += data.size
+            print(f"  {name:35s} → shape {list(tensor.shape):20s} ({data.size:8d} floats)")
+
+    file_size = total_params * 4 + 24  # 24 bytes header
+    print(f"\n  Total: {total_params:,} parámetros → {file_size:,} bytes ({file_size/1024:.1f} KB)")
+    print(f"  Archivo guardado: {filepath}")
+
+
+def generation_demo(engine):
+    """Demo de generación con muestreo multinomial."""
+    print("\n--- DEMO DE GENERACIÓN (Muestreo Multinomial) ---")
+    tokenizer = MinimalBPETokenizer()
+    output = engine.generate(tokenizer, "hola ", max_tokens=30, temperature=0.8)
+    print(f"Prompt: 'hola '")
+    print(f"Output: '{output}'")
+    print("(Nota: con un modelo char-level de 2 epochs, la salida será caótica. Normal.)")
+
+
 if __name__ == "__main__":
     engine = train()
     parity_test(engine)
+    export_to_bin(engine, "aether_weights.bin")
+    generation_demo(engine)
