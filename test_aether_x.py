@@ -23,7 +23,7 @@ def main():
     with torch.no_grad():
         full = m(ids, m.init_state(2, dev), adaptive=False); st = m.init_state(2, dev); pieces = []
         for i in range(ids.shape[1]):
-            z, st = m.step(ids[:, i:i + 1], st); pieces.append(z)
+            z, st = m.step(ids[:, i:i + 1], st, adaptive=False); pieces.append(z)
         err = (full - torch.cat(pieces, 1)).abs().max().item()
     ok &= check(f"forward == step (err={err:.2e})", err < 1e-5)
 
