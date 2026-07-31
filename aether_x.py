@@ -17,16 +17,9 @@ import torch.nn.functional as F
 
 from aether_v4 import KairosTokenizer, RMSNorm, lm_loss
 
-
-X0_CFG = dict(
-    vocab_size=16_000,
-    hidden_dim=512,
-    ffn_dim=2048,
-    memory_slots=8,
-    scratch_size=32,
-    deep_threshold=0.50,
-    tie_embeddings=True,
-)
+X0_CFG = dict(vocab_size=16_000, hidden_dim=512, ffn_dim=2048,
+              memory_slots=8, scratch_size=32, deep_threshold=0.50,
+              tie_embeddings=True)
 
 
 @dataclass
@@ -68,6 +61,7 @@ class SharedAetherCell(nn.Module):
         self.w3 = nn.Linear(ffn_dim, d, bias=False)
         self.halt = nn.Linear(d, 1)
         self._deep_tokens = 0; self._total_tokens = 0
+        self._halt_sum = None; self._halt_count = 0
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -107,15 +101,29 @@ class SharedAetherCell(nn.Module):
     def step(self, x, st, adaptive=True):
         h1, s1 = self._core(x, st)
         if not adaptive: return h1, s1
-        deep = torch.sigmoid(self.halt(x).squeeze(-1)) < self.deep_threshold
-        self._deep_tokens += int(deep.sum().item()); self._total_tokens += int(x.shape[0])
+        p_fast = torch.sigmoid(self.halt(x).squeeze(-1))
+        deep = p_fast < self.deep_threshold
+        self._deep_tokens += int(deep.detach().sum().item()); self._total_tokens += int(x.shape[0])
+        self._halt_sum = p_fast.mean() if self._halt_sum is None else self._halt_sum + p_fast.mean()
+        self._halt_count += 1
         if not deep.any(): return h1, s1
         idx = deep.nonzero(as_tuple=False).squeeze(-1)
         h2, s2 = self._core(h1[idx], _select(s1, idx))
-        h = h1.clone(); h[idx] = h2
+        # Soft interpolation only on selected rows: the route is efficient,
+        # but the halt head still receives gradient from the chosen depth.
+        p = p_fast[idx].unsqueeze(-1)
+        h = h1.clone(); h[idx] = p * h1[idx] + (1.0 - p) * h2
         return h, _merge(s1, s2, idx)
 
-    def reset_stats(self): self._deep_tokens = self._total_tokens = 0
+    def route_penalty(self):
+        if self._halt_sum is None: return torch.zeros((), device=self.halt.weight.device)
+        # Penaliza pensar de mas; el modelo solo usa deep si compra loss.
+        return self._halt_sum / max(1, self._halt_count)
+
+    def reset_stats(self):
+        self._deep_tokens = self._total_tokens = self._halt_count = 0
+        self._halt_sum = None
+
     def stats(self):
         return dict(deep_tokens=self._deep_tokens, total_tokens=self._total_tokens,
                     deep_ratio=self._deep_tokens / max(1, self._total_tokens))
@@ -191,7 +199,7 @@ def smoke(device="cpu"):
     torch.manual_seed(7)
     c = dict(X0_CFG, hidden_dim=96, ffn_dim=256, memory_slots=4, scratch_size=8)
     m = AetherX(128, c).to(device).train(); ids = torch.randint(0, 128, (2, 19), device=device)
-    logits, st = m(ids, return_state=True); loss = lm_loss(logits[:, :-1], ids[:, 1:]); loss.backward()
+    logits, st = m(ids, return_state=True); loss = lm_loss(logits[:, :-1], ids[:, 1:]) + 1e-3 * m.cell.route_penalty(); loss.backward()
     with torch.no_grad():
         m.eval(); a = m(ids, m.init_state(2, device), adaptive=False)
         ss = m.init_state(2, device); ys = []
